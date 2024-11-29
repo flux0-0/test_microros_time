@@ -1,82 +1,74 @@
+#include <micro_ros_platformio.h>
+#include <stdio.h>
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
 #include <rclc/rclc.h>
-#include <rclc/executor.h>
-
-#include <std_msgs/msg/int64.h>
 #include <rmw_microros/rmw_microros.h>
+#include <Arduino.h>
+#include <WiFi.h>
+#include <TimeLib.h> // Thêm thư viện xử lý thời gian
 
-#include <stdio.h>
-#include <unistd.h>
+rclc_support_t support;
+rcl_allocator_t allocator;
 
-rcl_publisher_t publisher;
-std_msgs__msg__Int64 msg;
+#define HWSERIAL Serial1
 
+#define LED_PIN 13
 
-#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)) {printf("Failed status on line %d: %d. Continuing.\n", __LINE__, (int)temp_rc);}}
-#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)) {printf("Failed status on line %d: %d. Aborting.\n", __LINE__, (int)temp_rc); return 1;}}
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
 
+const int timeout_ms = 1000;
+static int64_t time_ms;
+static time_t time_seconds;
+char time_str[25];
 
-
-// Callback 
-void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
-{
-    (void) last_call_time;
-    (void) timer;
-
-    // Đồng bộ thời gian với Agent
-    RCSOFTCHECK(rmw_uros_sync_session(1000));
-
-    // Lấy thời gian Epoch tính bằng nanoseconds
-    int64_t time_ns = rmw_uros_epoch_nanos();
-
-    // Chuyển đổi thời gian Epoch thành định dạng chuẩn ROS 2
-    msg.data = time_ns;
-
-    // Xuất bản thông điệp
-    RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
-
-    // In thời gian lên console
-    printf("UNIX time: %ld nanoseconds\n", time_ns);
+void error_loop() {
+  while (1) {
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    delay(100);
+  }
 }
 
-int main()
-{
-    rcl_allocator_t allocator = rcl_get_default_allocator();
-    rclc_support_t support;
+void setup() {
+  Serial.begin(115200);
+  IPAddress agent_ip(10, 10, 86, 237);
+  size_t agent_port = 8888;
+  char ssid[] = "UET-Wifi-Office-Free 2.4Ghz";
+  char psk[] = "";
 
-    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+  // Kết nối WiFi và thiết lập micro-ROS
+  WiFi.begin(ssid, psk);
+  set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
 
-    rcl_node_t node;
-    RCCHECK(rclc_node_init_default(&node, "micro_ros_node", "", &support));
+  HWSERIAL.begin(115200); // Configure debug serial
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
 
-    // Tạo publisher
-    RCCHECK(rclc_publisher_init_default(
-        &publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int64),
-        "epoch_time_ns"));
+  delay(2000);
 
-    // Tạo timer
-    rcl_timer_t timer;
-    const unsigned int timer_timeout = 1000; // 1 giây
-    RCCHECK(rclc_timer_init_default(
-        &timer,
-        &support,
-        RCL_MS_TO_NS(timer_timeout),
-        timer_callback));
+  allocator = rcl_get_default_allocator();
 
-    // Tạo executor
-    rclc_executor_t executor = rclc_executor_get_zero_initialized_executor();
-    RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
-    RCCHECK(rclc_executor_add_timer(&executor, &timer));
+  // Create init_options
+  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+}
 
-    // spin
-    rclc_executor_spin(&executor);
+void loop() {
+  // Synchronize time
+  RCCHECK(rmw_uros_sync_session(timeout_ms));
+  time_ms = rmw_uros_epoch_millis();
 
-    // clean
-    RCCHECK(rcl_publisher_fini(&publisher, &node));
-    RCCHECK(rcl_node_fini(&node));
+  if (time_ms > 0) {
+    time_seconds = time_ms / 1000;
+    setTime(time_seconds); 
+    sprintf(time_str, "%02d.%02d.%04d %02d:%02d:%02d.%03d", day(), month(), year(), hour(), minute(), second(), (uint)time_ms % 1000);
 
-    return 0;
+    HWSERIAL.print("Agent date: ");
+    HWSERIAL.println(time_str);  
+  } else {
+    HWSERIAL.print("Session sync failed, error code: ");
+    HWSERIAL.println((int) time_ms);  
+  }
+
+  delay(1001);
 }
